@@ -1,6 +1,5 @@
-
 import { useCallback, useEffect, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import api from "../services/api";
 
 const styles = {
@@ -12,7 +11,7 @@ const styles = {
     color: "#1f2937",
   },
   card: {
-    background: "#ffffff",
+    background: "#fff",
     padding: "28px",
     borderRadius: "14px",
     boxShadow: "0 5px 24px rgba(0,0,0,0.08)",
@@ -51,6 +50,7 @@ const styles = {
   },
   select: {
     width: "100%",
+    boxSizing: "border-box",
     padding: "12px",
     border: "1px solid #d1d5db",
     borderRadius: "7px",
@@ -61,7 +61,7 @@ const styles = {
     width: "100%",
     padding: "13px",
     background: "#4f46e5",
-    color: "#ffffff",
+    color: "#fff",
     border: "none",
     borderRadius: "8px",
     fontSize: "16px",
@@ -69,19 +69,11 @@ const styles = {
     cursor: "pointer",
     marginTop: "12px",
   },
-  secondaryButton: {
-    padding: "11px 15px",
-    background: "#ffffff",
-    color: "#374151",
-    border: "1px solid #d1d5db",
-    borderRadius: "7px",
-    cursor: "pointer",
-  },
   successButton: {
     width: "100%",
     padding: "13px",
     background: "#15803d",
-    color: "#ffffff",
+    color: "#fff",
     border: "none",
     borderRadius: "8px",
     fontSize: "15px",
@@ -93,7 +85,7 @@ const styles = {
     width: "100%",
     padding: "13px",
     background: "#b91c1c",
-    color: "#ffffff",
+    color: "#fff",
     border: "none",
     borderRadius: "8px",
     fontSize: "15px",
@@ -144,9 +136,32 @@ function money(value) {
   return Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
 }
 
+function getErrorMessage(error, fallback) {
+  const detail = error.response?.data?.detail;
+
+  if (typeof detail === "string") {
+    return detail;
+  }
+
+  if (Array.isArray(detail)) {
+    return detail.map((item) => item.msg || "Invalid request").join(", ");
+  }
+
+  return error.response?.data?.message || error.message || fallback;
+}
+
 export default function Checkout() {
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+
   const bookingId = searchParams.get("booking_id");
+  const numericBookingId = Number(bookingId);
+
+  // Correctly validate a positive integer booking ID.
+  const validBookingId =
+    Boolean(bookingId) &&
+    /^[1-9]\d*$/.test(bookingId) &&
+    Number.isSafeInteger(numericBookingId);
 
   const [booking, setBooking] = useState(null);
   const [existingPayment, setExistingPayment] = useState(null);
@@ -163,12 +178,6 @@ export default function Checkout() {
   const [couponError, setCouponError] = useState("");
   const [notice, setNotice] = useState("");
 
-  const numericBookingId = Number(bookingId);
-  const validBookingId =
-    bookingId &&
-    Number.isInteger(numericBookingId) &&
-    numericBookingId > 0;
-
   const fetchBooking = useCallback(async () => {
     if (!validBookingId) {
       setError("Booking ID is missing or invalid in the URL.");
@@ -180,32 +189,28 @@ export default function Checkout() {
     setError("");
 
     try {
-      const response = await api.get(
-        `/api/v1/bookings/${numericBookingId}`
+      const bookingResponse = await api.get(
+        `/bookings/${numericBookingId}`
       );
 
-      setBooking(response.data);
+      setBooking(bookingResponse.data);
 
-      // A booking can exist without a payment record.
-      // In that case, the payment lookup may return 404.
       try {
         const paymentResponse = await api.get(
-          `/api/v1/payments/booking/${numericBookingId}`
+          `/payments/booking/${numericBookingId}`
         );
 
         setExistingPayment(paymentResponse.data);
-      } catch (paymentErr) {
-        if (paymentErr.response?.status === 404) {
+      } catch (paymentError) {
+        if (paymentError.response?.status === 404) {
           setExistingPayment(null);
         } else {
-          // Keep the booking visible even if the payment lookup fails.
-          setExistingPayment(null);
+          throw paymentError;
         }
       }
     } catch (err) {
       setError(
-        err.response?.data?.detail ||
-          "Unable to load the booking. Please check the booking ID."
+        getErrorMessage(err, "Unable to load booking details. Please try again.")
       );
     } finally {
       setLoading(false);
@@ -234,12 +239,25 @@ export default function Checkout() {
       "PENDING"
   ).toUpperCase();
 
+  // Prefer a newly validated coupon. Otherwise show the amount
+  // stored in the existing payment, including its saved discount.
+  const savedPaymentAmount = Number(existingPayment?.amount);
+
   const finalAmount = couponResult
     ? Number(couponResult.final_amount)
-    : amount;
+    : Number.isFinite(savedPaymentAmount) &&
+        existingPayment?.amount != null
+      ? savedPaymentAmount
+      : amount;
+
+  const savedDiscount = Number(existingPayment?.discount_amount ?? 0);
+
+  const displayedDiscount = couponResult
+    ? Number(couponResult.discount_amount ?? 0)
+    : savedDiscount;
 
   const canPay =
-    booking &&
+    Boolean(booking) &&
     validAmount &&
     bookingStatus === "PENDING" &&
     paymentStatus !== "SUCCESS";
@@ -257,40 +275,29 @@ export default function Checkout() {
       return;
     }
 
-    if (!booking) {
-      setCouponError("Booking details have not loaded yet.");
+    if (!booking || !validAmount) {
+      setCouponError("Valid booking details are required.");
       return;
     }
 
     if (bookingStatus !== "PENDING") {
-      setCouponError(
-        "A coupon can only be applied to a pending booking."
-      );
-      return;
-    }
-
-    if (!validAmount) {
-      setCouponError("The booking amount is invalid.");
+      setCouponError("A coupon can only be applied to a pending booking.");
       return;
     }
 
     setValidatingCoupon(true);
 
     try {
-      const response = await api.post(
-        "/api/v1/coupons/validate",
-        {
-          code: couponCode.trim().toUpperCase(),
-          booking_id: numericBookingId,
-        }
-      );
+      const response = await api.post("/coupons/validate", {
+        code: couponCode.trim().toUpperCase(),
+        booking_id: numericBookingId,
+      });
 
       setCouponResult(response.data);
       setNotice("Coupon validated successfully.");
     } catch (err) {
       setCouponError(
-        err.response?.data?.detail ||
-          "Unable to validate the coupon."
+        getErrorMessage(err, "Unable to validate this coupon.")
       );
     } finally {
       setValidatingCoupon(false);
@@ -312,72 +319,89 @@ export default function Checkout() {
     }
 
     if (bookingStatus === "CONFIRMED") {
-      setError(
-        "This booking is already confirmed. Open My Bookings to view it."
-      );
+      setError("This booking is already confirmed. You do not need to pay again.");
       return;
     }
 
     if (paymentStatus === "SUCCESS") {
-      setError(
-        "This booking already has a successful payment. It cannot be paid for again."
-      );
+      setError("This booking already has a successful payment.");
       return;
     }
 
     if (couponCode.trim() && !couponResult) {
-      setError(
-        "You entered a coupon code. Apply and validate it before continuing, or clear the coupon field."
-      );
+      setError("Please apply and validate your coupon, or clear the coupon field.");
       return;
     }
 
     setProcessing(true);
 
     try {
-      // The backend must calculate the discount and payment amount.
-      const createResponse = await api.post(
-        "/api/v1/payments/",
-        {
+      let paymentId = existingPayment?.id;
+
+      const hasNewCoupon = Boolean(couponResult);
+
+      /*
+       * Reuse an existing pending payment when the user has not
+       * applied a new coupon. This preserves its saved discount.
+       *
+       * Otherwise, POST /payments/ creates or resets the payment
+       * using the current payment method and validated coupon.
+       */
+      const shouldCreateOrUpdatePayment =
+        !existingPayment ||
+        paymentStatus !== "PENDING" ||
+        hasNewCoupon;
+
+      if (shouldCreateOrUpdatePayment) {
+        const createResponse = await api.post("/payments/", {
           booking_id: numericBookingId,
           payment_method: paymentMethod,
           coupon_code: couponResult?.coupon_code ?? null,
+        });
+
+        paymentId =
+          createResponse.data?.id ??
+          createResponse.data?.payment_id ??
+          paymentId;
+
+        if (!paymentId) {
+          throw new Error(
+            "The payment API did not return a payment ID. Check the POST /payments/ response."
+          );
         }
-      );
 
-      const paymentId =
-        createResponse.data?.id ??
-        createResponse.data?.payment_id;
-
-      if (!paymentId) {
-        throw new Error(
-          "The backend did not return a payment ID."
-        );
+        setExistingPayment(createResponse.data);
       }
 
-      // Development-only simulation. This does not charge real money.
+      if (!paymentId) {
+        throw new Error("Unable to find a payment ID for this booking.");
+      }
+
+      // Send the outcome in the JSON request body expected by FastAPI.
       const simulationResponse = await api.post(
-        `/api/v1/payments/${paymentId}/simulate`,
-        null,
+        `/payments/${paymentId}/simulate`,
         {
-          params: { outcome },
+          success: outcome === "success",
         }
       );
 
-      const finalPaymentId =
-        simulationResponse.data?.id ?? paymentId;
+      if (outcome === "failure") {
+        setCouponResult(null);
+        setNotice("Payment failed as expected. You can try again.");
+        await fetchBooking();
+        return;
+      }
 
-      window.location.assign(
-        `/payment-confirmation?payment_id=${encodeURIComponent(
-          finalPaymentId
-        )}`
+      const finalPaymentId =
+        simulationResponse.data?.id ??
+        simulationResponse.data?.payment_id ??
+        paymentId;
+
+      navigate(
+        `/payment-confirmation?payment_id=${encodeURIComponent(finalPaymentId)}`
       );
     } catch (err) {
-      setError(
-        err.response?.data?.detail ||
-          err.message ||
-          "Payment processing failed."
-      );
+      setError(getErrorMessage(err, "Payment processing failed."));
     } finally {
       setProcessing(false);
     }
@@ -394,12 +418,12 @@ export default function Checkout() {
     );
   }
 
-  if (error && !booking) {
+  if (!booking) {
     return (
       <main style={styles.page}>
         <div style={styles.card}>
           <h1>Unable to Open Checkout</h1>
-          <p style={styles.error}>{error}</p>
+          <p style={styles.error}>{error || "Booking not found."}</p>
 
           <button
             type="button"
@@ -410,23 +434,10 @@ export default function Checkout() {
           </button>
 
           <p>
-            <Link to="/" style={styles.link}>
-              Return to Home
+            <Link to="/bookings" style={styles.link}>
+              Return to My Bookings
             </Link>
           </p>
-        </div>
-      </main>
-    );
-  }
-
-  if (!booking) {
-    return (
-      <main style={styles.page}>
-        <div style={styles.card}>
-          <h1>Booking Not Found</h1>
-          <Link to="/" style={styles.link}>
-            Return to Home
-          </Link>
         </div>
       </main>
     );
@@ -445,10 +456,10 @@ export default function Checkout() {
         <h1 style={styles.heading}>Secure Checkout</h1>
 
         <p style={styles.subtitle}>
-          Review your booking and apply a coupon before continuing.
+          Review your booking, apply a coupon, and choose a payment method.
         </p>
 
-        <div style={styles.section}>
+        <section style={styles.section}>
           <h2>Booking Details</h2>
 
           <div style={styles.detail}>
@@ -464,9 +475,7 @@ export default function Checkout() {
           <div style={styles.detail}>
             <span>Tickets</span>
             <strong>
-              {booking.ticket_quantity ??
-                booking.quantity ??
-                "Unavailable"}
+              {booking.ticket_quantity ?? booking.quantity ?? "Unavailable"}
             </strong>
           </div>
 
@@ -475,24 +484,38 @@ export default function Checkout() {
             <strong>₹{money(amount)}</strong>
           </div>
 
-          <div style={styles.detail}>
-            <span>Payment Status</span>
-            <span style={styles.status}>{paymentStatus}</span>
-          </div>
+          {displayedDiscount > 0 && (
+            <>
+              <div style={styles.detail}>
+                <span>Saved Coupon Discount</span>
+                <strong style={{ color: "#15803d" }}>
+                  −₹{money(displayedDiscount)}
+                </strong>
+              </div>
+
+              <div style={styles.detail}>
+                <span>Discounted Payment Amount</span>
+                <strong>₹{money(finalAmount)}</strong>
+              </div>
+            </>
+          )}
 
           <div style={styles.detail}>
             <span>Booking Status</span>
             <span style={styles.status}>{bookingStatus}</span>
           </div>
-        </div>
 
-        <div style={styles.section}>
+          <div style={styles.detail}>
+            <span>Payment Status</span>
+            <span style={styles.status}>{paymentStatus}</span>
+          </div>
+        </section>
+
+        <section style={styles.section}>
           <h2>Apply Coupon</h2>
 
           <form onSubmit={handleApplyCoupon}>
-            <label htmlFor="couponCode">
-              Coupon Code
-            </label>
+            <label htmlFor="couponCode">Coupon Code</label>
 
             <input
               id="couponCode"
@@ -522,19 +545,13 @@ export default function Checkout() {
                 bookingStatus !== "PENDING"
               }
             >
-              {validatingCoupon
-                ? "Validating Coupon..."
-                : "Apply Coupon"}
+              {validatingCoupon ? "Validating Coupon..." : "Apply Coupon"}
             </button>
           </form>
 
-          {couponError && (
-            <p style={styles.error}>{couponError}</p>
-          )}
+          {couponError && <p style={styles.error}>{couponError}</p>}
 
-          {notice && (
-            <p style={styles.success}>{notice}</p>
-          )}
+          {notice && <p style={styles.success}>{notice}</p>}
 
           {couponResult && (
             <div style={styles.section}>
@@ -545,9 +562,7 @@ export default function Checkout() {
 
               <div style={styles.detail}>
                 <span>Original Amount</span>
-                <span>
-                  ₹{money(couponResult.original_amount)}
-                </span>
+                <span>₹{money(couponResult.original_amount)}</span>
               </div>
 
               <div style={styles.detail}>
@@ -565,21 +580,17 @@ export default function Checkout() {
               </div>
             </div>
           )}
-        </div>
+        </section>
 
-        <div style={styles.section}>
+        <section style={styles.section}>
           <h2>Payment Method</h2>
 
-          <label htmlFor="paymentMethod">
-            Select a payment method
-          </label>
+          <label htmlFor="paymentMethod">Select a payment method</label>
 
           <select
             id="paymentMethod"
             value={paymentMethod}
-            onChange={(event) =>
-              setPaymentMethod(event.target.value)
-            }
+            onChange={(event) => setPaymentMethod(event.target.value)}
             style={styles.select}
             disabled={processing || !canPay}
           >
@@ -591,18 +602,13 @@ export default function Checkout() {
           <div style={styles.detail}>
             <span>Amount to Pay</span>
             <strong style={{ fontSize: "22px" }}>
-              ₹{money(
-                Number.isFinite(finalAmount)
-                  ? finalAmount
-                  : amount
-              )}
+              ₹{money(finalAmount)}
             </strong>
           </div>
 
           {bookingStatus === "CONFIRMED" && (
             <p style={styles.success}>
-              This booking is already confirmed. You do not
-              need to pay again.
+              This booking is already confirmed. You do not need to pay again.
             </p>
           )}
 
@@ -620,57 +626,53 @@ export default function Checkout() {
 
           {existingPayment?.payment_status === "PENDING" && (
             <p style={styles.notice}>
-              An existing pending payment was found. If the
-              backend rejects a new payment, the existing
-              payment must be updated or reused by the backend
-              before a coupon can be applied to it.
+              An existing pending payment was found. Its saved discount will
+              be preserved unless you apply a new coupon.
             </p>
           )}
 
-          {error && (
-            <p style={styles.error}>{error}</p>
-          )}
+          {error && <p style={styles.error}>{error}</p>}
 
           {canPay && (
             <>
               <button
                 type="button"
-                style={styles.successButton}
+                style={{
+                  ...styles.successButton,
+                  opacity: processing ? 0.7 : 1,
+                }}
                 disabled={processing}
                 onClick={() => handlePayment("success")}
               >
                 {processing
                   ? "Processing..."
-                  : `Simulate Successful Payment — ₹${money(
-                      Number.isFinite(finalAmount)
-                        ? finalAmount
-                        : amount
-                    )}`}
+                  : `Simulate Successful Payment — ₹${money(finalAmount)}`}
               </button>
 
               <button
                 type="button"
-                style={styles.failedButton}
+                style={{
+                  ...styles.failedButton,
+                  opacity: processing ? 0.7 : 1,
+                }}
                 disabled={processing}
                 onClick={() => handlePayment("failure")}
               >
-                {processing
-                  ? "Processing..."
-                  : "Simulate Failed Payment"}
+                {processing ? "Processing..." : "Simulate Failed Payment"}
               </button>
             </>
           )}
 
           <p style={styles.subtitle}>
-            Development mode only. No real money is charged.
+            Development mode only. This simulation does not charge real money.
           </p>
 
           <p>
-            <Link to="/" style={styles.link}>
-              Return to Home
+            <Link to="/bookings" style={styles.link}>
+              Return to My Bookings
             </Link>
           </p>
-        </div>
+        </section>
       </div>
     </main>
   );

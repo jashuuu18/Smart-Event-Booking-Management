@@ -1,4 +1,5 @@
 
+from datetime import date, datetime, time, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -6,10 +7,11 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import require_organizer
-from app.models import Event, User, Booking, Notification
+from app.models import Event, User, Booking
 from app.schemas import EventCreate, EventUpdate, EventResponse
 from app.services.event_service import update_event_status
 from app.services.notification_service import create_notification
+
 
 router = APIRouter(
     prefix="/api/v1/events",
@@ -46,23 +48,125 @@ def create_event(
     return event
 
 
-# Get all events with optional category and title search
+# Get events with optional search and filters
 @router.get("/", response_model=list[EventResponse])
 def get_events(
-    category: Optional[str] = Query(default=None),
-    search: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(
+        default=None,
+        max_length=200,
+        description="Search event title or description"
+    ),
+    category: Optional[str] = Query(
+        default=None,
+        max_length=50,
+        description="Filter by event category"
+    ),
+    location: Optional[str] = Query(
+        default=None,
+        max_length=200,
+        description="Search by location"
+    ),
+    date_from: Optional[date] = Query(
+        default=None,
+        description="Include events starting on or after this date (YYYY-MM-DD)"
+    ),
+    date_to: Optional[date] = Query(
+        default=None,
+        description="Include events starting on or before this date (YYYY-MM-DD)"
+    ),
+    min_price: Optional[float] = Query(
+        default=None,
+        ge=0,
+        description="Minimum ticket price"
+    ),
+    max_price: Optional[float] = Query(
+        default=None,
+        ge=0,
+        description="Maximum ticket price"
+    ),
+    available_only: bool = Query(
+        default=False,
+        description="Show only events with available tickets"
+    ),
     db: Session = Depends(get_db)
 ):
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(
+            status_code=422,
+            detail="date_from cannot be later than date_to"
+        )
+
+    if (
+        min_price is not None
+        and max_price is not None
+        and min_price > max_price
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="min_price cannot be greater than max_price"
+        )
+
     query = db.query(Event)
 
-    if category:
-        query = query.filter(Event.category.ilike(category))
+    # Search title and description
+    if search and search.strip():
+        search_term = f"%{search.strip()}%"
+        query = query.filter(
+            Event.title.ilike(search_term)
+            | Event.description.ilike(search_term)
+        )
 
-    if search:
-        query = query.filter(Event.title.ilike(f"%{search}%"))
+    # Category: case-insensitive partial match
+    if category and category.strip():
+        query = query.filter(
+            Event.category.ilike(f"%{category.strip()}%")
+        )
+
+    # Location: case-insensitive partial match
+    if location and location.strip():
+        query = query.filter(
+            Event.location.ilike(f"%{location.strip()}%")
+        )
+
+    # Date range, including the entire date_to day
+    if date_from:
+        start_datetime = datetime.combine(
+            date_from,
+            time.min
+        )
+        query = query.filter(
+            Event.event_date >= start_datetime
+        )
+
+    if date_to:
+        end_datetime = datetime.combine(
+            date_to + timedelta(days=1),
+            time.min
+        )
+        query = query.filter(
+            Event.event_date < end_datetime
+        )
+
+    # Ticket price range
+    if min_price is not None:
+        query = query.filter(
+            Event.ticket_price >= min_price
+        )
+
+    if max_price is not None:
+        query = query.filter(
+            Event.ticket_price <= max_price
+        )
+
+    # Availability
+    if available_only:
+        query = query.filter(
+            Event.available_tickets > 0
+        )
 
     events = query.order_by(Event.event_date.asc()).all()
 
+    # Refresh event statuses without changing the existing response shape.
     for event in events:
         update_event_status(event)
 
@@ -118,7 +222,6 @@ def update_event(
             detail="You can only update your own events"
         )
 
-    # Validate the final start and end dates together.
     new_start = (
         event_data.event_date
         if event_data.event_date is not None
@@ -137,7 +240,6 @@ def update_event(
             detail="Event end date must be after event start date"
         )
 
-    # Update only the fields provided by the organizer.
     if event_data.title is not None:
         event.title = event_data.title
 
@@ -181,10 +283,8 @@ def update_event(
             event_data.total_tickets - tickets_sold
         )
 
-    # Refresh the status after changing the dates.
     update_event_status(event)
 
-    # Notify users with active bookings for this event.
     bookings = (
         db.query(Booking)
         .filter(
@@ -213,14 +313,15 @@ def update_event(
 
 
 # Cancel an event and notify users with bookings
-
 @router.put("/{event_id}/cancel", response_model=EventResponse)
 def cancel_event(
     event_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_organizer)
 ):
-    event = db.query(Event).filter(Event.id == event_id).first()
+    event = db.query(Event).filter(
+        Event.id == event_id
+    ).first()
 
     if not event:
         raise HTTPException(
@@ -240,10 +341,8 @@ def cancel_event(
             detail="Event is already cancelled"
         )
 
-    # Cancel the event.
     event.event_status = "CANCELLED"
 
-    # Find active bookings for this event.
     bookings = (
         db.query(Booking)
         .filter(
@@ -254,13 +353,9 @@ def cancel_event(
     )
 
     for booking in bookings:
-        # Restore tickets from this booking.
         event.available_tickets += booking.ticket_quantity
-
-        # Cancel the booking.
         booking.booking_status = "CANCELLED"
 
-        # Notify the customer.
         create_notification(
             db=db,
             user_id=booking.user_id,

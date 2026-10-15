@@ -163,6 +163,11 @@ class OrganizerBookingResponse(BaseModel):
     created_at: datetime
 
 
+class BookingCancellationResponse(BookingResponse):
+    refund_status: str = "NOT_APPLICABLE"
+
+
+
 def format_booking_response(booking: Booking) -> dict:
     event = booking.event
 
@@ -267,6 +272,7 @@ class PaymentResponse(BaseModel):
     booking_id: int
     payment_method: str
     payment_status: str
+    refund_status: str = "NOT_APPLICABLE"
     transaction_id: Optional[str] = None
     amount: float
     created_at: datetime
@@ -276,10 +282,12 @@ class PaymentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# class PaymentSimulationRequest(BaseModel):
+#     booking_id: int = Field(gt=0)
+#     payment_method: Literal["SIMULATED"] = "SIMULATED"
+#     simulated_result: Literal["SUCCESS", "FAILED"]
 class PaymentSimulationRequest(BaseModel):
-    booking_id: int = Field(gt=0)
-    payment_method: Literal["SIMULATED"] = "SIMULATED"
-    simulated_result: Literal["SUCCESS", "FAILED"]
+    success: bool
 
 
 # =========================================================
@@ -358,3 +366,29 @@ class CouponApplyResponse(BaseModel):
     discount_amount: float
     final_amount: float
     message: str
+
+
+class ProfileUpdate(BaseModel):
+    username: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=50,
+    )
+    email: EmailStr | None = None
+
+
+from pydantic import BaseModel, Field
+
+
+class ChatbotRequest(BaseModel):
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=1000,
+        description="The user's message to the SmartEvent chatbot",
+    )
+
+
+class ChatbotResponse(BaseModel):
+    reply: str
+    suggestions: list[str] = []

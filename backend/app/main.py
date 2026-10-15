@@ -18,7 +18,12 @@ from app.routers import (
     organizer,
     admin,
     payments,
-    coupons
+    coupons,
+    availability,
+    recommendations,
+    wishlist,
+    announcements,
+    chatbot
 )
 
 from app.exceptions import (
@@ -83,8 +88,16 @@ app.include_router(tickets.router)
 app.include_router(notifications.router)
 app.include_router(organizer.router)
 app.include_router(admin.router)
-app.include_router(payments.router, prefix="/api/v1")
+app.include_router(payments.router)
 app.include_router(coupons.router)
+app.include_router(availability.router)
+app.include_router(recommendations.router)
+app.include_router(wishlist.router)
+app.include_router(announcements.router)
+app.include_router(
+    chatbot.router,
+    prefix="/api/v1",
+)
 
 
 @app.get("/")

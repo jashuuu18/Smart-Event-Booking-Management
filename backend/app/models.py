@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     CheckConstraint,
+    UniqueConstraint,
     Enum
 )
 
@@ -215,6 +216,12 @@ class Payment(Base):
         default="PENDING"
     )
 
+    refund_status = Column(
+        String(20),
+        nullable=False,
+        default="NOT_APPLICABLE"
+    )
+
     transaction_id = Column(
         String(100),
         nullable=True,
@@ -358,3 +365,130 @@ class Coupon(Base):
             name="check_coupon_used_count_nonnegative",
         ),
     )
+
+
+class EventView(Base):
+    __tablename__ = "event_views"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True
+    )
+
+    event_id = Column(
+        Integer,
+        ForeignKey("events.id"),
+        nullable=False,
+        index=True
+    )
+
+    viewed_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False
+    )
+
+    user = relationship("User")
+    event = relationship("Event")
+
+
+class Wishlist(Base):
+    __tablename__ = "wishlists"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "event_id",
+            name="uq_wishlist_user_event",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    event_id = Column(
+        Integer,
+        ForeignKey("events.id"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+    event = relationship("Event")
+
+
+class EventAnnouncement(Base):
+    __tablename__ = "event_announcements"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    event_id = Column(
+        Integer,
+        ForeignKey("events.id"),
+        nullable=False,
+        index=True,
+    )
+
+    title = Column(String(200), nullable=False)
+    message = Column(Text, nullable=False)
+
+    announcement_type = Column(
+        String(50),
+        default="GENERAL",
+        nullable=False,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    event = relationship("Event")
+
+
+class ChatbotMessage(Base):
+    __tablename__ = "chatbot_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    role = Column(
+        String(20),
+        nullable=False,
+    )
+
+    message = Column(
+        Text,
+        nullable=False,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")

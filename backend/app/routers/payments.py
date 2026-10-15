@@ -152,11 +152,7 @@ def create_payment(
                 detail="This booking has already been paid for",
             )
 
-        if existing_payment.payment_status == "PENDING":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="A pending payment already exists for this booking",
-            )
+        
 
     original_amount = round(float(booking.total_price), 2)
     coupon = None

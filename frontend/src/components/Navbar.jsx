@@ -24,6 +24,7 @@ function Navbar() {
           {user ? (
             <>
               <Link to="/profile">Profile</Link>
+              <Link to="/wishlist">Wishlist ❤️</Link>
               <Link to="/bookings">My Bookings</Link>
               <Link to="/tickets">My Tickets</Link>
               <Link to="/notifications">Notifications</Link>
